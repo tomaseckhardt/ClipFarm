@@ -1,23 +1,29 @@
 # ClipFarm
 
 Automatické highlight klipy ze streamů. Vložíš odkaz na YouTube video nebo živý stream z Kicku, ClipFarm ho
-stáhne (nebo nahrává), podle chatu a zvuku najde nejlepší momenty a nastříhá z nich klipy. Funguje na Linuxu,
-Windows i macOS, ovládá se z jednoho okna.
+stáhne (nebo nahrává), podle reakcí chatu a hlasitosti najde nejlepší momenty a nastříhá z nich klipy – na šířku,
+nebo na výšku pro Shorts a TikTok. Funguje na Linuxu, Windows i macOS a ovládá se z jednoho okna.
 
-![Karta Běží: nahrávání živého streamu s časovačem](docs/ui-bezi.png)
+![Karta Klipy: streamy podle streamera, zdrojové video a klipy s časem, délkou a skóre](docs/ui-klipy.png)
 
-![Karta Klipy: streamy podle streamera, klipy s časem, délkou a skóre](docs/ui-klipy.png)
+## Rychlý start
+
+1. **Nainstaluj** (jednou): Linux `bash instalace-linux.sh`, Windows dvojklik na `instalace-windows.bat`,
+   macOS dvojklik na `instalace-macos.command`. Podrobnosti v [Instalace](#instalace).
+2. **Otevři ClipFarm** z nabídky aplikací (Linux), plochy / nabídky Start (Windows) nebo Launchpadu (macOS).
+3. **Vlož odkaz** – YouTube video nebo `https://kick.com/<kanál>` – a zmáčkni **▶ Spustit**.
+4. Hotové klipy najdeš v kartě **Klipy**, dvojklik je přehraje.
 
 ## Co umí
 
 - **YouTube** video nebo záznam streamu: stáhne video (max. 720p) i záznam chatu, pokud existuje.
-- **Kick** živý stream (`https://kick.com/<kanál>`): nahrává video i chat, dokud stream neskončí,
-  nebo po nastavenou dobu (časovač), nebo dokud nezmáčkneš **Ukončit a nastříhat**.
-- **Výběr momentů** podle reakce chatu (spam jednoho člověka se nepočítá) a hlasitosti, viz níž.
+- **Kick** živý stream: nahrává video i chat, dokud stream neskončí, nebo po nastavenou dobu (časovač),
+  nebo dokud nezmáčkneš **Ukončit a nastříhat**. Nahrávání běží dál i po zavření okna.
+- **Výběr momentů** podle reakce chatu (spam jednoho člověka se nepočítá) a hlasitosti – viz
+  [Jak vybírá momenty](#jak-vybírá-momenty).
 - **Klipy** začínají na střihu scény nebo v pauze mezi slovy a končí, až reakce opadne (typicky 20–60 s).
   Na šířku 16:9, nebo **na výšku 9:16** (Shorts, TikTok, Reels) s rozmazaným pozadím.
-- **Okno** na všechno: spuštění, přehled běžících nahrávání s odpočtem, časovač, přehrání klipu nebo
-  zdrojového videa, přepočet skóre, přestříhání s jiným limitem, mazání. Nahrávání běží dál i po zavření okna.
+- **Přepočet skóre a přestříhání** už staženého streamu s jiným limitem nebo formátem, bez nového stahování.
 - **Neuspává počítač**, dokud něco běží (na Linuxu i po zaklapnutí víka).
 - **Prohlížení v prohlížeči** přes vestavěný server `http://127.0.0.1:8765/`, který funguje i s prohlížečem
   ve Flatpaku nebo po přesunutí složky.
@@ -25,8 +31,8 @@ Windows i macOS, ovládá se z jednoho okna.
 ## Instalace
 
 Potřebuje Python 3.12+, [yt-dlp](https://github.com/yt-dlp/yt-dlp), ffmpeg a Node.js (yt-dlp ho používá
-na YouTube). Instalační skripty doinstalují, co chybí, a spustí ClipFarm. Ten si při prvním spuštění vytvoří
-ikonu.
+na YouTube). Instalační skripty doinstalují jen to, co chybí, a spustí ClipFarm. Ten si při prvním spuštění
+vytvoří ikonu.
 
 | Systém | Instalace | Kde je pak ikona |
 |---|---|---|
@@ -36,33 +42,50 @@ ikonu.
 
 Po přesunutí složky spusť `ClipFarm.py` jednou ručně, ať ikona ukazuje na nové místo.
 
-## Použití
+## Okno
 
-### Okno (`ClipFarm.py`)
+**Nahoře** je pole pro odkaz a **▶ Spustit**. Pod ním nastavení, které platí pro spuštění i pro přestříhání:
 
-**Nahoře:** odkaz a **▶ Spustit**. Pod tím nastavení pro spuštění i přestříhání: **Limit skóre** (jak výrazný
-musí moment být, výchozí 2,5), **Nahrávat živák** („dokud neskončí“, 30 min, 2 h… nebo vlastní, třeba
-`1 h 30 min`) a **Klipy na výšku 9:16**.
+- **Limit skóre** – jak výrazný musí moment být, aby z něj vznikl klip (výchozí 2,5; víc = méně a lepších klipů),
+- **Nahrávat živák** – „dokud neskončí“, 30 min, 2 h… nebo vlastní, třeba `1 h 30 min`,
+- **Klipy na výšku 9:16** – pro Shorts, TikTok a Reels.
 
-**Karta Běží**
+### Karta Běží
 
-- všechno, co běží (i spuštěné z terminálu): jak dlouho, **odpočet do konce** nahrávání, kolik je nahráno,
-- **⏹ Ukončit a nastříhat**: ukončí nahrávání živáku a hned nastříhá, co je nahrané,
-- **Změnit konec** + **⏱ Nastavit**: časovač i u nahrávání, které už běží,
-- **■ Stop**: objeví se jen u vybraného přestříhání nebo přepočtu skóre a zastaví ho (hotové klipy zůstanou),
-- **Neuspávat počítač** a log vybrané úlohy.
+![Karta Běží: nahrávání živáku s odpočtem do konce a vybrané přestříhání s tlačítkem Stop](docs/ui-bezi.png)
 
-**Karta Klipy**
+- Všechno, co běží – i spuštěné z terminálu: jak dlouho, **odpočet do konce** nahrávání, kolik je nahráno.
+- **⏹ Ukončit a nastříhat** – ukončí nahrávání živáku a hned nastříhá, co je nahrané.
+- **Změnit konec** + **⏱ Nastavit** – časovač i u nahrávání, které už běží (prodloužit, zkrátit, „dokud
+  neskončí“).
+- **■ Stop** – objeví se jen u vybraného přestříhání nebo přepočtu skóre a zastaví ho; hotové klipy zůstanou.
+- **Neuspávat počítač** a dole log vybrané úlohy.
 
-- streamer → stream → zdrojové video (`stream.mp4`) a klipy (čas ve streamu, délka, skóre); vidět je každá
-  složka s videem, i nedokončená nebo bez klipů; dvojklik přehraje,
-- **✂ Přestříhat**: znovu nastříhá stream s aktuálním limitem a formátem bez stahování (použije i uložený
-  chat); staré klipy se nahradí, až budou nové hotové,
-- **Σ Přepočítat skóre**: nic nestříhá, jen ukáže, kolik klipů by dal který limit, a přepočítá skóre
-  současných klipů na aktuální stupnici,
-- **Složka**, **V prohlížeči**, **Smazat zdroj** (uvolní místo, klipy zůstanou), **Smazat**.
+### Karta Klipy
 
-### Terminál (`Klipy.py`)
+- Streamer → stream → **zdrojové video** (`stream.mp4`) a **klipy** s časem ve streamu, délkou a skóre.
+  Vidět je každá složka s videem, i nedokončená nebo bez klipů. Dvojklik přehraje.
+- **✂ Přestříhat** – znovu nastříhá stream s aktuálním limitem a formátem, bez stahování (použije uložený
+  chat). Staré klipy se nahradí, až budou nové hotové.
+- **Σ Přepočítat skóre** – nic nestříhá, jen ukáže, kolik klipů by dal který limit, a přepočítá skóre
+  současných klipů na aktuální stupnici:
+
+  ![Výsledek Přepočítat skóre: nejvyšší skóre a kolik klipů by vzniklo při každém limitu](docs/ui-skore.png)
+
+- **Složka**, **V prohlížeči**, **Smazat zdroj** (uvolní místo, klipy zůstanou, ale stream už nepůjde
+  přestříhat), **Smazat** (klip nebo celý stream).
+
+### Typický postup
+
+1. Živák: vlož `https://kick.com/<kanál>`, nastav **Nahrávat živák** (třeba 3 h) a **▶ Spustit**. Můžeš
+   odejít – po čase nebo s koncem streamu se klipy nastříhají samy.
+2. Málo nebo moc klipů? V kartě Klipy vyber stream → **Σ Přepočítat skóre** → podle tabulky nastav nahoře
+   **Limit skóre** → **✂ Přestříhat**.
+3. Na TikTok: zaškrtni **Klipy na výšku 9:16** a dej **✂ Přestříhat**.
+
+## Terminál
+
+Všechno jde i bez okna přes `Klipy.py`:
 
 ```bash
 python3 Klipy.py <odkaz | složka streamu> [limit skóre] [minuty nahrávání živáku]
@@ -76,21 +99,22 @@ CLIPFARM_VERTICAL=1 python3 Klipy.py "https://…"                    # klipy na
 
 Ctrl+C během nahrávání = ukončit a nastříhat, co je nahrané.
 
-### Co vznikne
+## Co vznikne
 
 ```
 klipy/
 ├── index.html                          ← přehled všech streamů
-├── _logy/                              ← logy a stav běžících nahrávání (pro okno)
+├── _logy/                              ← logy a stav běžících úloh (pro okno)
 └── <kanál>/<datum [čas] – název>/
     ├── 01.mp4, 02.mp4, …               ← klipy
     ├── index.html                      ← stránka streamu s klipy
-    ├── klipy.json, info.json           ← data pro okno a přestříhání
+    ├── klipy.json, info.json           ← data pro okno, přestříhání a přepočet skóre
     ├── stream.mp4                      ← zdrojové video (dá se smazat, pak už nejde přestříhat)
     └── stream.live_chat.json           ← chat (YouTube záznam nebo nahraný Kick chat)
 ```
 
-Složka `klipy/` je vždy vedle `Klipy.py`, ať ho spustíš odkudkoli.
+Složka `klipy/` je vždy vedle `Klipy.py`, ať ho spustíš odkudkoli. Vlastní video jde zpracovat taky: dej ho do
+`klipy/<kanál>/<datum – název>/stream.mp4` a v okně dej **✂ Přestříhat**.
 
 ## Jak vybírá momenty
 
@@ -115,8 +139,8 @@ Všechny hodnoty jsou konstanty nahoře v `Klipy.py` (`MIN_SCORE`, `GAP`, `AROUN
 
 - **VODy na Kicku** jsou často jen pro předplatitele a stáhnout nejdou. Živý stream je veřejný, proto
   ClipFarm nahrává živě (od chvíle spuštění, ne od začátku streamu).
-- **Bez chatu** (YouTube reuploady, nesestříhaná videa) rozhoduje jen zvuk a výsledky jsou slabší; pro taková
-  videa limit sniž (např. 1,5).
+- **Bez chatu** (YouTube reuploady, nahraná videa) rozhoduje jen zvuk a výsledky jsou slabší; pro taková
+  videa limit sniž (např. 1,5) – správnou hodnotu ukáže **Σ Přepočítat skóre**.
 - **Prolínačka mezi scénami bez ztišení** se pozná jen podle obrazu, ne vždy. Výpadek streamu (BRB obrazovka)
   s „???“ v chatu může vypadat jako reakce.
 - **Zaklapnutí víka:** na Windows ho řídí Nastavení napájení („Při zavření víka: Nic nedělat“), na macOS
@@ -127,8 +151,8 @@ Všechny hodnoty jsou konstanty nahoře v `Klipy.py` (`MIN_SCORE`, `GAP`, `AROUN
 ## Vývoj
 
 ```bash
-python3 Klipy.py --test       # self-check výběru momentů, hranic klipů, chatu, časovače, záchrany nahrávky
-python3 ClipFarm.py --test    # self-check okna: stav nahrávání, časovač, mazání, webový server
+python3 Klipy.py --test       # self-check: momenty, hranice klipů, chat, časovač, záchrana nahrávky, 9:16
+python3 ClipFarm.py --test    # self-check okna: stav úloh, časovač, Stop, mazání, seznam videí, webový server
 ```
 
 Bez závislostí mimo standardní knihovnu Pythonu (yt-dlp a ffmpeg se volají jako programy, Kick chat přes
