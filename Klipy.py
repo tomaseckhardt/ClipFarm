@@ -6,6 +6,7 @@
 do konce streamu, Ctrl+C (nebo „Ukončit“ v okně ClipFarm) = ukončit nahrávání a hned nastříhat, co je nahrané.
 Místo odkazu složka už staženého streamu = jen znovu nastříhá. Volitelně 2. argument = limit skóre,
 3. argument = kolik minut živák z Kicku nahrávat (pak sám skončí a nastříhá; bez něj do konce streamu).
+python Klipy.py --skore <složka> = jen přepočítat skóre (kolik klipů by dal který limit), nic nestříhá.
 
 Potřebuje: Python 3.12+, yt-dlp, ffmpeg (Windows: instalace-windows.bat, macOS: instalace-macos.command).  Self-check: python Klipy.py --test
 """
@@ -41,6 +42,7 @@ AFTER, MAX_AFTER = 8, 40   # konec: až reakce opadne, nejdřív 8 s a nejpozdě
 CALM, CALM_LEN = 1.0, 3    # reakce opadla = skóre aspoň 3 s pod 1 σ
 SCENE = 0.2                # změna obrazu mezi snímky po 0,2 s nad tuhle mez = střih / prolínačka scény
 SNAP = 2.0                 # o kolik s se smí začátek/konec posunout dovnitř, aby nestříhal uprostřed slova
+MIN_CLIP = 3               # kratší klip (moment sevřený mezi dvěma tichy) se přeskočí
 SILENCE_DB, SILENCE_LEN = -55, 1.5  # ticho = černá obrazovka / pauza / přechod scény, klip přes něj nejde
 HYPE = re.compile(r"kekw|omegalul|lul|lmao|pog|xd+|wtf|haha|\?{3,}|!{3,}|😂|🤣|💀", re.IGNORECASE)
 HYPE_WEIGHT = 2            # zpráva s emotem/"xddd" = 1 + 2 ...
@@ -61,6 +63,7 @@ def download(url):
         stdout=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
         # vlastní skupina procesů (Linux i Windows): jde jí poslat Ctrl+C/Break, aniž by ho dostal i tenhle proces
         start_new_session=True, creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    job_update(ytdlp=proc.pid)  # okno ho při „Zastavit“ ukončí taky (má vlastní skupinu procesů)
     stop, done, begun = threading.Event(), "", {}
 
     def read():
@@ -168,6 +171,11 @@ ROOT = Path(__file__).resolve().parent / "klipy"  # klipy se ukládají vedle Kl
 JOBS = ROOT / "_logy"  # stav běžících Klipy.py pro okno ClipFarm + logy
 KICK_LIVE = re.compile(r"https?://(?:www\.)?kick\.com/([\w-]+)/?")  # kanál = živý stream (VOD má /videos/)
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0 Safari/537.36"
+VERTICAL_9_16 = (  # 16:9 -> 1080×1920 s rozmazaným pozadím: celý obraz zůstane vidět, nic se neořízne (Shorts/TikTok/Reels)
+    "split=2[bg][fg];"
+    "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=40:10[bg];"
+    "[fg]scale=1080:1920:force_original_aspect_ratio=decrease:force_divisible_by=2[fg];"
+    "[bg][fg]overlay=(W-w)/2:(H-h)/2")
 
 
 def kick_line(msg, offset):
@@ -396,8 +404,9 @@ def clip_range(loud10, sil, score, cuts, s):
             start, snap_start = b, True
         if s <= a < end:
             end, snap_end = a, True
-    return (quietest(loud10, start, start + SNAP) if snap_start else start,
-            quietest(loud10, end - SNAP, end) if snap_end else end)
+    # pauza mezi slovy jen mezi okrajem a momentem: začátek nikdy za momentem, konec nikdy před ním
+    return (quietest(loud10, start, min(start + SNAP, s)) if snap_start else start,
+            quietest(loud10, max(end - SNAP, s), end) if snap_end else end)
 
 
 def clips_word(n):
@@ -423,54 +432,116 @@ def write_overview(root):
         f'li{{margin:.3rem 0}}</style><h1>ClipFarm</h1>{"".join(parts)}', encoding="utf-8")
 
 
+PREVIEW = (1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0)  # „Přepočítat skóre“: kolik klipů by dal který limit
+
+
+def load_json(path, default):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+
+
+def start_job(target, kind):
+    """Stav běhu pro okno ClipFarm (_logy/<pid>.json, po skončení se smaže) + neuspávat počítač."""
+    JOBS.mkdir(parents=True, exist_ok=True)
+    job_update(pid=os.getpid(), target=target, kind=kind, started=time.time(), log=os.environ.get("CLIPFARM_LOG"),
+               part=None)
+    for f in (JOBS / f"{os.getpid()}.json", JOBS / f"{os.getpid()}.stop"):
+        atexit.register(f.unlink, missing_ok=True)
+    if os.environ.get("CLIPFARM_AWAKE", "1") == "1":
+        keep_awake()
+
+
+def open_stream(target):
+    """(info, video) už stažené složky streamu; info.json doplní z názvu složky, když chybí (video přidané ručně)."""
+    folder = Path(target).resolve()
+    folder = folder if folder.is_dir() else folder.parent
+    video = folder / "stream.mp4"
+    if not video.exists():
+        sys.exit(f"{folder.name}: chybí stream.mp4 (zdrojové video smazané?)")
+    if not (folder / "info.json").exists():  # údaje z názvu složky „<datum> – <název>“
+        (folder / "info.json").write_text(json.dumps({
+            "id": "", "title": folder.name.partition(" – ")[2] or folder.name, "channel,uploader": folder.parent.name,
+            "channel_url,uploader_url": "", "upload_date>%d. %m. %Y": "", "webpage_url": "", "extractor_key": ""},
+            ensure_ascii=False, indent=1), encoding="utf-8")
+    return json.loads((folder / "info.json").read_text(encoding="utf-8")) | {"filepath": str(video)}, video
+
+
+def analyze(video):
+    """(hlasitost po 0,1 s, úseky ticha, skóre každé sekundy) ze zvuku videa a uloženého chatu."""
+    loud10 = load_audio(video)
+    loud = [statistics.fmean(loud10[i:i + 10]) for i in range(0, len(loud10) - 9, 10)]
+    return loud10, silences(loud10), score_of(loud, load_chat(video.with_suffix(".live_chat.json"), len(loud)))
+
+
+def summary(score):
+    """Nejvyšší skóre a kolik klipů by dal který limit (pro klipy.json a okno)."""
+    return {"max": round(max(score, default=0), 1),
+            "preview": {str(lim): len(pick_peaks(score, GAP, AROUND, lim)) for lim in PREVIEW}}
+
+
+def rescore(target):
+    """Přepočítá skóre streamu (nic nestříhá): skóre současných klipů na aktuální stupnici + kolik klipů by dal
+    který limit, ať jde vybrat limit před přestříháním."""
+    start_job(target, "skore")
+    _, video = open_stream(target)
+    _, _, score = analyze(video)
+    data_file = video.parent / "klipy.json"
+    data: dict = load_json(data_file, {"min_score": MIN_SCORE, "clips": []})
+    for c in data["clips"]:  # skóre klipu = nejvyšší skóre v jeho rozsahu
+        c["score"] = round(max(score[int(c["start"]):int(c["end"]) + 1], default=0), 1)
+    data |= summary(score)
+    data_file.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    write_page(video.parent)
+    print(f"Nejvyšší skóre: {data['max']}")
+    for lim, n in data["preview"].items():
+        print(f"  limit {lim}: {clips_word(n)}")
+
+
 def main(target, min_score=MIN_SCORE, minutes=0):
     """target = odkaz (stáhne / nahraje živák), nebo složka už staženého streamu (jen znovu nastříhá).
     minutes > 0: živák z Kicku nahrávat jen tak dlouho, pak ukončit a nastříhat."""
-    JOBS.mkdir(parents=True, exist_ok=True)
-    job_update(pid=os.getpid(), target=target, started=time.time(), log=os.environ.get("CLIPFARM_LOG"), part=None)
-    for f in (JOBS / f"{os.getpid()}.json", JOBS / f"{os.getpid()}.stop"):
-        atexit.register(f.unlink, missing_ok=True)
+    start_job(target, "klipy")
     if minutes and KICK_LIVE.fullmatch(target):
         (JOBS / f"{os.getpid()}.stop").write_text(str(time.time() + minutes * 60), encoding="utf-8")
-    if os.environ.get("CLIPFARM_AWAKE", "1") == "1":
-        keep_awake()
     if Path(target).exists():
-        folder = Path(target).resolve()
-        folder = folder if folder.is_dir() else folder.parent
-        video = folder / "stream.mp4"
-        if not (folder / "info.json").exists() or not video.exists():
-            sys.exit(f"{folder.name}: chybí info.json nebo stream.mp4 (zdrojové video smazané?), nejde přestříhat")
-        info = json.loads((folder / "info.json").read_text(encoding="utf-8")) | {"filepath": str(video)}
+        info, video = open_stream(target)
     else:
         info, video = download(target)
         (video.parent / "info.json").write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
     title, channel = info["title"], info["channel,uploader"]
-    loud10 = load_audio(video)
-    loud = [statistics.fmean(loud10[i:i + 10]) for i in range(0, len(loud10) - 9, 10)]
-    sil = silences(loud10)
-    chat = load_chat(video.with_suffix(".live_chat.json"), len(loud))
-    score = score_of(loud, chat)
+    loud10, sil, score = analyze(video)
     peaks = pick_peaks(score, GAP, AROUND, min_score)
     tmp = video.parent / "_nove"  # nové klipy bokem: přerušení přestříhání nesmaže ty staré
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir()
-    print(f"{len(peaks)} momentů se skóre >= {min_score} (nejvyšší {max(score, default=0):.1f})")
+    print(f"Momentů se skóre >= {min_score}: {len(peaks)} (nejvyšší skóre {max(score, default=0):.1f})")
 
+    vf = ["-vf", VERTICAL_9_16] if os.environ.get("CLIPFARM_VERTICAL", "0") == "1" else []  # 9:16 na výšku
     clips = []
-    for i, s in enumerate(peaks, 1):
+    for s in peaks:
         start, end = clip_range(loud10, sil, score, scene_cuts(video, s - BEFORE - 10, s + MAX_AFTER + 6), s)
-        clip = f"{i:02d}.mp4"
+        if end - start < MIN_CLIP:
+            print(f"! moment {hms(s)} přeskočen: kolem je ticho, klip by měl jen {end - start:.1f} s")
+            continue
+        clip = f"{len(clips) + 1:02d}.mp4"
         print(f"{clip}  {hms(start)}–{hms(end)} ({end - start:.1f} s)  moment {hms(s)}  skóre {score[s]:.1f}")
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{start:.1f}", "-i", str(video), "-t", f"{end - start:.1f}",
-                        "-c:v", "h264", "-b:v", "6M", "-c:a", "aac", "-movflags", "+faststart",
-                        str(tmp / clip)], check=True)
+        try:  # jeden nepovedený klip nesmí shodit celý běh (a s ním všechny hotové klipy)
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{start:.1f}", "-i", str(video), "-t", f"{end - start:.1f}",
+                            *vf, "-c:v", "h264", "-b:v", "6M", "-c:a", "aac", "-movflags", "+faststart",
+                            str(tmp / clip)], check=True)
+        except subprocess.CalledProcessError:
+            print(f"! {clip} se nepovedl nastříhat, přeskakuji", file=sys.stderr)
+            continue
         clips.append({"file": clip, "start": start, "end": end, "score": round(score[s], 1)})
     for old in video.parent.glob("[0-9]*.mp4"):  # hotovo: staré klipy pryč, nové na jejich místo
         old.unlink()
     for new in tmp.iterdir():
         new.rename(video.parent / new.name)
     tmp.rmdir()
-    (video.parent / "klipy.json").write_text(json.dumps({"min_score": min_score, "clips": clips}, indent=1), encoding="utf-8")
+    (video.parent / "klipy.json").write_text(json.dumps({"min_score": min_score, "clips": clips} | summary(score), indent=1),
+                                             encoding="utf-8")
     write_page(video.parent)
     print(f"Hotovo: {channel} – {title}\n  {video.parent / 'index.html'}\n  přehled: {video.parents[2] / 'index.html'}")
 
@@ -491,7 +562,7 @@ def write_page(folder):
         f'grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:1rem;margin:1rem}}header{{grid-column:1/-1}}'
         f'video{{width:100%}}</style><header><p><a href="../../index.html">← všechny streamy</a></p><h1>{t}</h1>'
         f'<p>Streamer: <b>{who}</b> · {html.escape(info["upload_date>%d. %m. %Y"])} · '
-        f'<a href="{html.escape(info["webpage_url"])}">původní {"video na YouTube" if yt else "stream"}</a></p>'
+        f'{f"<a href=\"{html.escape(info["webpage_url"])}\">původní {"video na YouTube" if yt else "stream"}</a>" if info["webpage_url"] else ""}</p>'
         f'</header>{"".join(figs) or f"<p>Žádný moment nepřekročil skóre {data["min_score"]}.</p>"}', encoding="utf-8")
     write_overview(folder.parent.parent)
 
@@ -528,6 +599,9 @@ def selftest():
     assert abs(start - 95.3) < 1e-9 and end == 131.5, (start, end)
     start, end = clip_range(plain10, [], [0.0] * 200, [95.0, 121.0], 110)
     assert abs(end - 120.7) < 1e-9, "konec na střihu scény poblíž"
+    # moment sevřený mezi dvěma tichy: začátek ani konec nesmí přeskočit moment (dřív vyšel klip -1 s a shodil běh)
+    start, end = clip_range(plain10, [(107.0, 110.0), (110.0, 113.0)], [0.0] * 200, [], 110)
+    assert start <= 110 <= end, (start, end)
 
     def msg(ms, author, *runs):
         item = {"message": {"runs": list(runs)}} | ({"authorExternalChannelId": author} if author else {})
@@ -553,6 +627,13 @@ def selftest():
                         f"{final}.part"], check=True)
         salvage(final)
         assert final.exists() and not Path(f"{final}.part").exists(), "salvage"
+    with tempfile.TemporaryDirectory() as d:  # vertikální 9:16: filtr musí projít ffmpegem a dát přesně 1080×1920
+        src, out = Path(d) / "s.mp4", Path(d) / "v.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=d=1:s=640x360", str(src)], check=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-vf", VERTICAL_9_16, str(out)], check=True)
+        wh = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                             "-of", "csv=p=0:s=x", str(out)], check=True, capture_output=True, text=True).stdout.strip()
+        assert wh == "1080x1920", wh
     # časovač: .stop s časem za 1 s -> watch_stop počká a pak nahrávání ukončí (jako Ctrl+C)
     JOBS.mkdir(parents=True, exist_ok=True)
     flag = JOBS / f"{os.getpid()}.stop"
@@ -575,9 +656,11 @@ if __name__ == "__main__":
             stream.reconfigure(encoding="utf-8", errors="replace")
     if sys.argv[1:] == ["--test"]:
         selftest()
+    elif len(sys.argv) == 3 and sys.argv[1] == "--skore":
+        rescore(sys.argv[2])
     elif 2 <= len(sys.argv) <= 4:
         main(sys.argv[1], float(sys.argv[2].replace(",", ".")) if len(sys.argv) >= 3 else MIN_SCORE,
              int(sys.argv[3]) if len(sys.argv) == 4 else 0)
     else:
         sys.exit("Použití: python Klipy.py <youtube-url | https://kick.com/<kanál> | složka streamu> [limit skóre]"
-                 " [minuty nahrávání živáku]")
+                 " [minuty nahrávání živáku]\n         python Klipy.py --skore <složka streamu>   (jen přepočítat skóre)")

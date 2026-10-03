@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """ClipFarm okno (Linux, Windows, macOS): všechno kolem Klipy.py bez terminálu a prohlížeče.
 
-Karta Běží: vložit odkaz -> Spustit, přehled běžících nahrávání, Ukončit a nastříhat, log, neuspávat počítač.
+Karta Běží: vložit odkaz -> Spustit, přehled běžících nahrávání, Ukončit a nastříhat, Stop přestříhání, log.
 Karta Klipy: streamy podle streamera, přehrát klip, přestříhat stream, smazat klip / zdrojové video / stream.
 
 Spuštění: python3 ClipFarm.py (Windows: dvojklik). Zároveň vytvoří/aktualizuje ikonu: Linux v nabídce aplikací
 GNOME, Windows zástupce na ploše a v nabídce Start, macOS ~/Applications/ClipFarm.app (Launchpad, Dock).
 Po přesunutí složky ho spusť jednou ručně, ať ikona ukazuje na nové místo.  Self-check: python3 ClipFarm.py --test
 """
+import contextlib
 import http.server
 import json
 import os
@@ -15,6 +16,7 @@ import plistlib
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -28,7 +30,6 @@ from urllib.parse import quote
 import Klipy
 
 HERE = Path(__file__).resolve().parent
-KLIPY = HERE / "Klipy.py"
 TIMES = ("dokud neskončí", "30 min", "1 h", "2 h", "3 h", "5 h")  # nabídka časovače, jde napsat i vlastní
 
 
@@ -116,6 +117,21 @@ def jobs():
     return out
 
 
+def kill(pid, job):
+    """Zastaví běh natvrdo i s jeho yt-dlp a ffmpeg, bez stříhání. Hotové klipy zůstanou, rozpracované se zahodí."""
+    if sys.platform == "win32":  # /T = celý strom procesů
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, check=False,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+        return
+    for group in (pid, job.get("ytdlp")):  # Klipy.py a jeho ffmpeg mají jednu skupinu, yt-dlp vlastní
+        if group:
+            try:
+                os.killpg(group, signal.SIGTERM)
+            except OSError:  # už skončil, nebo spuštěno z terminálu (není vedoucí skupiny)
+                with contextlib.suppress(OSError):
+                    os.kill(group, signal.SIGTERM)
+
+
 def set_stop(pid, mins=None):
     """Kdy má Klipy.py ukončit nahrávání a nastříhat (soubor _logy/<pid>.stop): None hned, 0 dokud neskončí."""
     flag = Klipy.JOBS / f"{pid}.stop"
@@ -136,15 +152,8 @@ def minutes(text):
     return int(m[1] or 0) * 60 + int(m[2] or 0)
 
 
-def duration(secs):
-    if secs < 60:
-        return f"{int(secs)} s"
-    h, m = divmod(int(secs) // 60, 60)
-    return f"{h} h {m:02d} min" if h else f"{m} min"
-
-
 def end_text(pid, target):
-    """Kdy nahrávání skončí, pro sloupec Konec."""
+    """Odpočet do konce nahrávání (H:MM:SS) pro sloupec Do konce."""
     at = Klipy.stop_time(Klipy.JOBS / f"{pid}.stop")
     if not Klipy.KICK_LIVE.fullmatch(target):
         return "–"
@@ -152,7 +161,7 @@ def end_text(pid, target):
         return "dokud neskončí"
     if at <= time.time():
         return "ukončuje se…"
-    return f"za {duration(at - time.time())} ({time.strftime('%H:%M', time.localtime(at))})"
+    return Klipy.hms(at - time.time() + 0.999)  # zaokrouhlit nahoru: 0:00:00 až ve chvíli konce
 
 
 def tail(path, n=12):
@@ -166,16 +175,23 @@ def tail(path, n=12):
     return [l for l in text.replace("\r", "\n").splitlines() if l.strip()][-n:]
 
 
+VIDEO = (".mp4", ".mkv", ".webm", ".mov", ".part")
+
+
 def streams():
-    """[(kanál, složka streamu, info, klipy)], nejnovější nahoře. klipy = [{file, start, end, score}].
-    Složka se stránkou má vždy info.json i klipy.json (stránka se z nich generuje)."""
+    """[(kanál, složka, info, klipy, ostatní videa, nejvyšší skóre)] všech složek s nějakým videem, nejnovější nahoře: i nedokončené,
+    rozpracované nebo bez klipů. klipy = [{file, start, end, score}], ostatní = zdrojové video (stream.mp4 první) apod."""
     out = []
     for folder in Klipy.ROOT.glob("*/*/"):
-        if not (folder / "index.html").exists():
+        videos = sorted((f.name for f in folder.iterdir() if f.suffix.lower() in VIDEO),
+                        key=lambda n: (not n.startswith("stream."), n))
+        if not videos:
             continue
-        info = json.loads((folder / "info.json").read_text(encoding="utf-8"))
-        clips = json.loads((folder / "klipy.json").read_text(encoding="utf-8"))["clips"]
-        out.append((folder.parent.name, folder, info, [c for c in clips if (folder / c["file"]).exists()]))
+        data = Klipy.load_json(folder / "klipy.json", {"clips": []})
+        clips = [c for c in data["clips"] if c["file"] in videos]
+        named = {c["file"] for c in clips}
+        out.append((folder.parent.name, folder, Klipy.load_json(folder / "info.json", {}), clips,
+                    [v for v in videos if v not in named], data.get("max")))
     return sorted(out, key=lambda x: (x[0].lower(), [-ord(ch) for ch in x[1].name]))
 
 
@@ -183,10 +199,11 @@ def delete_clip(folder, name):
     """Smaže klip a přegeneruje stránku streamu."""
     (folder / name).unlink(missing_ok=True)
     data_file = folder / "klipy.json"
-    data = json.loads(data_file.read_text(encoding="utf-8"))
-    data["clips"] = [c for c in data["clips"] if c["file"] != name]
-    data_file.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    Klipy.write_page(folder)
+    if data_file.exists():  # jinak to nebyl klip (jiné video ve složce)
+        data = json.loads(data_file.read_text(encoding="utf-8"))
+        data["clips"] = [c for c in data["clips"] if c["file"] != name]
+        data_file.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        Klipy.write_page(folder)
 
 
 def delete_stream(folder):
@@ -264,16 +281,18 @@ def size(path):
     return f"{mb / 1000:.1f} GB" if mb >= 1000 else f"{mb:.0f} MB"
 
 
-def launch(target, limit, awake, mins=0):
+def launch(target, limit, awake, mins=0, vertical=False, rescore=False):
     """Spustí Klipy.py na pozadí (přežije zavření okna) s logem v klipy/_logy/."""
     Klipy.JOBS.mkdir(parents=True, exist_ok=True)
     log = Klipy.JOBS / f"{time.strftime('%Y-%m-%d %H.%M.%S')}.log"
-    env = os.environ | {"CLIPFARM_LOG": str(log), "CLIPFARM_AWAKE": "1" if awake else "0"}
+    env = os.environ | {"CLIPFARM_LOG": str(log), "CLIPFARM_AWAKE": "1" if awake else "0",
+                        "CLIPFARM_VERTICAL": "1" if vertical else "0"}
     python = Path(sys.executable)
     if python.name.lower() == "pythonw.exe":  # okno běží bez konzole, Klipy.py potřebuje normální python
         python = python.with_name("python.exe")
     with log.open("w", encoding="utf-8") as out:
-        return subprocess.Popen([str(python), "-u", str(KLIPY), target, str(limit), str(mins)], cwd=HERE, env=env, stdout=out,
+        args = ["--skore", target] if rescore else [target, str(limit), str(mins)]
+        return subprocess.Popen([str(python), "-u", Klipy.__file__, *args], cwd=HERE, env=env, stdout=out,
                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
@@ -292,24 +311,27 @@ class App(tk.Tk):
         super().__init__()
         self.title("ClipFarm")
         self.geometry("1200x760")
-        self.procs = []  # (Popen, cíl) spuštěné z okna
+        self.procs = []  # (Popen, cíl, přepočet skóre?) spuštěné z okna
         self.base = ""  # adresa webového serveru pro „V prohlížeči“, spustí se při prvním použití
 
         top = ttk.Frame(self, padding=(10, 10, 10, 0))
         top.pack(fill="x")
         ttk.Label(top, text="Odkaz (YouTube video nebo kick.com/kanál):").grid(row=0, column=0, sticky="w")
-        ttk.Label(top, text="Limit skóre:").grid(row=0, column=2, sticky="w", padx=(8, 0))
         self.url = ttk.Entry(top)
         self.url.grid(row=1, column=0, sticky="ew")
         self.url.bind("<Return>", lambda _: self.start(self.url.get().strip()))
-        ttk.Button(top, text="▶ Spustit", command=lambda: self.start(self.url.get().strip())).grid(row=1, column=1, padx=8)
-        self.limit = tk.StringVar(value=str(Klipy.MIN_SCORE))
-        ttk.Spinbox(top, textvariable=self.limit, from_=0.5, to=10, increment=0.5, width=6).grid(
-            row=1, column=2, sticky="w", padx=(8, 0))
-        ttk.Label(top, text="Nahrávat živák:").grid(row=0, column=3, sticky="w", padx=(12, 0))
-        self.timer = tk.StringVar(value=TIMES[0])
-        ttk.Combobox(top, textvariable=self.timer, values=TIMES, width=15).grid(row=1, column=3, sticky="w", padx=(12, 0))
+        ttk.Button(top, text="▶ Spustit", command=lambda: self.start(self.url.get().strip())).grid(row=1, column=1, padx=(8, 0))
         top.columnconfigure(0, weight=1)
+        opts = ttk.Frame(self, padding=(10, 6, 10, 0))  # nastavení pro spuštění i přestříhání
+        opts.pack(fill="x")
+        ttk.Label(opts, text="Limit skóre:").pack(side="left")
+        self.limit = tk.StringVar(value=str(Klipy.MIN_SCORE))
+        ttk.Spinbox(opts, textvariable=self.limit, from_=0.5, to=10, increment=0.5, width=6).pack(side="left", padx=(4, 16))
+        ttk.Label(opts, text="Nahrávat živák:").pack(side="left")
+        self.timer = tk.StringVar(value=TIMES[0])
+        ttk.Combobox(opts, textvariable=self.timer, values=TIMES, width=15).pack(side="left", padx=(4, 16))
+        self.vertical = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opts, text="Klipy na výšku 9:16", variable=self.vertical).pack(side="left")
 
         self.tabs = ttk.Notebook(self)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=10)
@@ -326,17 +348,18 @@ class App(tk.Tk):
     def build_jobs(self):
         tab = ttk.Frame(self.tabs, padding=8)
         self.jobs = ttk.Treeview(tab, columns=("target", "time", "end", "state"), show="headings", height=6)
-        columns(self.jobs, (("target", "Stream", "https://kick.com/lukyonair1"), ("time", "Běží", "10 h 00 min"),
-                            ("end", "Konec", "za 10 h 00 min (00:00)"), ("state", "Stav", None)))
+        columns(self.jobs, (("target", "Stream", "https://kick.com/lukyonair1"), ("time", "Běží", "10:00:00"),
+                            ("end", "Do konce", "dokud neskončí"), ("state", "Stav", None)))
         self.jobs.pack(fill="x")
         self.jobs.bind("<<TreeviewSelect>>", lambda _: self.show_log())
         bar = ttk.Frame(tab, padding=(0, 8))
         bar.pack(fill="x")
-        ttk.Button(bar, text="⏹ Ukončit a nastříhat", command=self.stop).pack(side="left")
+        ttk.Button(bar, text="⏹ Ukončit a nastříhat", command=self.finish).pack(side="left")
         ttk.Label(bar, text="Změnit konec:").pack(side="left", padx=(16, 4))
         self.new_end = tk.StringVar(value=TIMES[2])
         ttk.Combobox(bar, textvariable=self.new_end, values=TIMES, width=15).pack(side="left")
         ttk.Button(bar, text="⏱ Nastavit", command=self.set_end).pack(side="left", padx=(4, 0))
+        self.stop_btn = ttk.Button(bar, text="■ Stop", command=self.stop_reclip)  # vidět jen u vybraného přestříhání
         self.awake = tk.BooleanVar(value=True)
         lid = " (ani po zaklapnutí víka)" if sys.platform.startswith("linux") else ""
         ttk.Checkbutton(tab, text=f"Neuspávat počítač, dokud něco běží{lid}", variable=self.awake).pack(anchor="w", pady=(0, 8))
@@ -358,27 +381,38 @@ class App(tk.Tk):
         except ValueError:
             messagebox.showerror("ClipFarm", "Délku nahrávání napiš třeba jako 45 min, 2 h nebo 1 h 30 min.")
             return
-        self.procs.append((launch(target, limit, self.awake.get(), mins), target))
+        self.procs.append((launch(target, limit, self.awake.get(), mins, self.vertical.get()), target, False))
         if target.startswith("http"):
             self.url.delete(0, "end")
         self.tabs.select(0)
         self.status.configure(text="Spouštím…")
 
-    def selected_job(self):
+    def selected_job(self, running=None):
+        """(pid, stav) vybrané úlohy v kartě Běží; stav None, když nic vybraného neběží."""
         sel = self.jobs.selection()
-        return int(sel[0]) if sel else None
+        pid = int(sel[0]) if sel else None
+        return pid, (running if running is not None else jobs()).get(pid)
 
-    def stop(self):
-        pid = self.selected_job()
-        if pid is None:
-            messagebox.showinfo("ClipFarm", "Vyber v seznamu, co ukončit.")
+    def finish(self):
+        pid, job = self.selected_job()
+        if job is None:
+            messagebox.showinfo("ClipFarm", "Vyber v seznamu nahrávání, které chceš ukončit.")
+        elif not Klipy.KICK_LIVE.fullmatch(job.get("target", "")):
+            messagebox.showinfo("ClipFarm", "Ukončit a nastříhat jde u nahrávání živého streamu z Kicku.\n"
+                                            "Přestříhání zastavíš tlačítkem Stop.")
         elif messagebox.askyesno("ClipFarm", "Ukončit nahrávání a nastříhat, co je nahrané?"):
             set_stop(pid)
             self.status.configure(text="Ukončuji nahrávání, pak se nastříhají klipy…")
 
+    def stop_reclip(self):
+        pid, job = self.selected_job()
+        if job and messagebox.askyesno("ClipFarm", f"Zastavit přestříhání „{Path(job['target']).name}“?\n"
+                                                   "Současné klipy zůstanou, nové se zahodí."):
+            kill(pid, job)
+            self.status.configure(text=f"■ Přestříhání zastaveno: {Path(job['target']).name}")
+
     def set_end(self):
-        pid = self.selected_job()
-        job = jobs().get(pid) if pid else None
+        pid, job = self.selected_job()
         if job is None:
             messagebox.showinfo("ClipFarm", "Vyber v seznamu nahrávání, kterému chceš změnit konec.")
         elif not Klipy.KICK_LIVE.fullmatch(job.get("target", "")):
@@ -389,11 +423,15 @@ class App(tk.Tk):
             except ValueError:
                 messagebox.showerror("ClipFarm", "Délku napiš třeba jako 45 min, 2 h nebo 1 h 30 min.")
                 return
-            self.status.configure(text=f"Konec nahrávání: {end_text(pid, job['target'])}")
+            self.status.configure(text=f"Do konce nahrávání: {end_text(pid, job['target'])}")
 
     def show_log(self, running=None):
-        pid = self.selected_job()
-        job = (running if running is not None else jobs()).get(pid) if pid else None
+        _, job = self.selected_job(running)
+        reclip = job is not None and not job.get("target", "http").startswith("http")  # cíl = složka, ne odkaz
+        if reclip and not self.stop_btn.winfo_ismapped():  # Stop jen u vybraného přestříhání
+            self.stop_btn.pack(side="left", padx=(16, 0))
+        elif not reclip and self.stop_btn.winfo_ismapped():
+            self.stop_btn.pack_forget()
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.insert("end", "\n".join(tail(job.get("log")) if job else []))
@@ -404,11 +442,13 @@ class App(tk.Tk):
     def refresh(self):
         running = jobs()
         finished = [x for x in self.procs if x[0].poll() is not None]
-        for p, target in finished:
-            self.procs.remove((p, target))
+        for p, target, rescored in finished:
+            self.procs.remove((p, target, rescored))
             name = target if target.startswith("http") else Path(target).name
             self.status.configure(text=f"✔ Hotovo: {name}" if p.returncode == 0 else
                                   f"✖ Skončilo chybou ({p.returncode}): {name}, podrobnosti v klipy/_logy/")
+            if rescored and p.returncode == 0:
+                self.show_preview(Path(target))
         if finished:
             self.fill_clips()
         for iid in set(self.jobs.get_children()) - {str(p) for p in running}:
@@ -422,27 +462,29 @@ class App(tk.Tk):
             else:
                 state = "(spuštěno z terminálu)"
             target = job.get("target", "")
-            row = (target if target.startswith("http") else f"✂ {Path(target).name}",
-                   duration(time.time() - job.get("started", time.time())), end_text(pid, target), state)
+            icon = "Σ " if job.get("kind") == "skore" else "✂ "  # přepočet skóre / přestříhání
+            row = (target if target.startswith("http") else icon + Path(target).name,
+                   Klipy.hms(time.time() - job.get("started", time.time())), end_text(pid, target), state)
             if self.jobs.exists(str(pid)):
                 self.jobs.item(str(pid), values=row)
             else:
                 self.jobs.insert("", "end", iid=str(pid), values=row)
         self.show_log(running)
-        self.after(2000, self.refresh)
+        self.after(1000, self.refresh)  # po sekundě, ať odpočet Do konce plynule běží
 
     # --- karta Klipy ---
     def build_clips(self):
         tab = ttk.Frame(self.tabs, padding=8)
         bar = ttk.Frame(tab)
         bar.pack(fill="x", pady=(0, 8))
-        for text, cmd in (("▶ Přehrát", self.play), ("✂ Přestříhat", self.reclip), ("Otevřít složku", self.open_folder),
-                          ("V prohlížeči", self.open_browser), ("Smazat zdrojové video", self.delete_source),
+        for text, cmd in (("▶ Přehrát", self.play), ("✂ Přestříhat", self.reclip), ("Σ Přepočítat skóre", self.rescore),
+                          ("Složka", self.open_folder),
+                          ("V prohlížeči", self.open_browser), ("Smazat zdroj", self.delete_source),
                           ("Smazat", self.delete)):
-            ttk.Button(bar, text=text, command=cmd).pack(side="left", padx=(0, 6))
+            ttk.Button(bar, text=text, command=cmd, width=-4).pack(side="left", padx=(0, 6))  # šířka podle textu
         self.clips = ttk.Treeview(tab, columns=("when", "length", "score", "source"), show="tree headings")
         columns(self.clips, (("#0", "Stream / klip", None), ("when", "Kdy", "10:00:00–10:00:00"),
-                             ("length", "Délka", "100 klipů"), ("score", "Skóre", "10.0"), ("source", "Zdrojové video", "10.0 GB")))
+                             ("length", "Délka", "100 klipů"), ("score", "Skóre", "max 10.0"), ("source", "Zdrojové video", "10.0 GB")))
         scroll = ttk.Scrollbar(tab, command=self.clips.yview)
         self.clips.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
@@ -455,14 +497,18 @@ class App(tk.Tk):
         first = not self.clips.get_children()
         sel = self.clips.selection()
         self.clips.delete(*self.clips.get_children())
-        for channel, folder, info, clips in streams():
+        for channel, folder, info, clips, others, best in streams():
             ch = f"ch:{channel}"
             if not self.clips.exists(ch):
                 self.clips.insert("", "end", iid=ch, text=channel, open=first or ch in opened)
             source = folder / "stream.mp4"
             self.clips.insert(ch, "end", iid=str(folder), text=folder.name, open=str(folder) in opened,
-                              values=(info.get("upload_date>%d. %m. %Y", ""), Klipy.clips_word(len(clips)), "",
-                                      size(source) if source.exists() else "smazáno"))
+                              values=(info.get("upload_date>%d. %m. %Y", ""), Klipy.clips_word(len(clips)),
+                                      "" if best is None else f"max {best}", size(source) if source.exists() else "smazáno"))
+            for name in others:  # zdrojové video, rozpracovaná nahrávka, cokoli dalšího
+                what = {"stream.mp4": "zdrojové video"}.get(name, "nahrává se…" if name.endswith(".part") else "video")
+                self.clips.insert(str(folder), "end", iid=str(folder / name), text=name,
+                                  values=(what, "", "", size(folder / name)))
             for c in clips:
                 self.clips.insert(str(folder), "end", iid=str(folder / c["file"]), text=c["file"],
                                   values=(f"{Klipy.hms(c['start'])}–{Klipy.hms(c['end'])}",
@@ -478,12 +524,12 @@ class App(tk.Tk):
         sel = self.clips.selection()
         if not sel:
             return None
-        return "channel" if sel[0].startswith("ch:") else "clip" if sel[0].endswith(".mp4") else "stream"
+        return "channel" if sel[0].startswith("ch:") else "stream" if Path(sel[0]).is_dir() else "clip"
 
     def picked(self, *kinds):
         """Vybraná položka (cesta), pokud je jednoho z druhů kinds, jinak hláška a None."""
         if self.kind() not in kinds:
-            names = {"clip": "klip", "stream": "stream"}
+            names = {"clip": "klip nebo video", "stream": "stream"}
             messagebox.showinfo("ClipFarm", f"Nejdřív vyber {' nebo '.join(names[k] for k in kinds)} v seznamu.")
             return None
         return Path(self.clips.selection()[0])
@@ -496,20 +542,47 @@ class App(tk.Tk):
         if sel[0].startswith("ch:"):
             return Klipy.ROOT / sel[0].removeprefix("ch:")
         path = Path(sel[0])
-        return path.parent if path.suffix == ".mp4" else path
+        return path if path.is_dir() else path.parent
 
     def play(self):
         if path := self.picked("clip"):
             open_path(path)
 
-    def reclip(self):
+    def free_stream(self):
+        """Složka vybraného streamu se zdrojovým videem, který se zrovna nezpracovává; jinak hláška a None."""
         if self.picked("stream", "clip") is None:
-            return
+            return None
         folder = self.selected_folder()
-        if not (folder / "stream.mp4").exists() or not (folder / "info.json").exists():
-            messagebox.showerror("ClipFarm", "Zdrojové video je smazané, tenhle stream už nejde přestříhat.")
-        elif messagebox.askyesno("ClipFarm", f"Znovu nastříhat „{folder.name}“ s limitem {self.limit.get()}?\n"
-                                             "Současné klipy se nahradí, až budou nové hotové."):
+        if not (folder / "stream.mp4").exists():
+            messagebox.showerror("ClipFarm", "Zdrojové video (stream.mp4) chybí, s tímhle streamem už nejde pracovat.")
+        elif self.job_for(folder):
+            messagebox.showinfo("ClipFarm", "Tenhle stream se zrovna zpracovává. Počkej, nebo ho zastav v kartě Běží (Stop).")
+        else:
+            return folder
+        return None
+
+    def rescore(self):
+        if folder := self.free_stream():
+            self.procs.append((launch(str(folder), 0, self.awake.get(), rescore=True), str(folder), True))
+            self.tabs.select(0)
+            self.status.configure(text=f"Σ Přepočítávám skóre: {folder.name}…")
+
+    def show_preview(self, folder):
+        """Po přepočtu skóre: kolik klipů by dal který limit."""
+        data = Klipy.load_json(folder / "klipy.json", {})
+        rows = "\n".join(f"   limit {lim}  →  {Klipy.clips_word(n)}" for lim, n in data.get("preview", {}).items())
+        messagebox.showinfo("ClipFarm", f"Skóre přepočítáno: {folder.name}\n\nNejvyšší skóre: {data.get('max')}\n"
+                                        f"Kolik klipů by vzniklo při limitu:\n{rows}\n\n"
+                                        "Současné klipy mají skóre na aktuální stupnici. Limit nastav nahoře "
+                                        "a dej ✂ Přestříhat.")
+
+    def reclip(self):
+        if not (folder := self.free_stream()):
+            return
+        shape = "na výšku 9:16" if self.vertical.get() else "na šířku 16:9"
+        if messagebox.askyesno("ClipFarm", f"Znovu nastříhat „{folder.name}“\ns limitem {self.limit.get()}, {shape}?\n"
+                                           "Současné klipy se nahradí, až budou nové hotové.\n"
+                                           "(Limit a formát se nastavují nahoře v okně.)"):
             self.start(str(folder))
 
     def open_folder(self):
@@ -521,17 +594,21 @@ class App(tk.Tk):
         self.base = self.base or serve()[1]
         webbrowser.open(self.base + quote(page.relative_to(Klipy.ROOT).as_posix()))
 
-    def in_use(self, folder):
-        """Stream se zrovna přestříhává, nebo se do něj nahrává."""
-        targets = [j.get("target", "") for j in jobs().values()]
-        return any(not t.startswith("http") and Path(t).resolve() == folder for t in targets) or \
-            any(folder.glob("*.part")) or (folder / "_nove").exists()
+    def job_for(self, folder):
+        """PID úlohy, která zrovna zpracovává (přestříhává, nahrává, stahuje) stream ve složce, nebo None."""
+        for pid, job in jobs().items():
+            target, part = job.get("target", ""), job.get("part")
+            if (not target.startswith("http") and Path(target).resolve() == folder) or (part and Path(part).parent == folder):
+                return pid
+        return None
 
     def delete_source(self):
-        folder = self.picked("stream")
-        if folder is None or not (folder / "stream.mp4").exists():
+        if self.picked("stream", "clip") is None:
             return
-        if self.in_use(folder):
+        folder = self.selected_folder()
+        if not (folder / "stream.mp4").exists():
+            return
+        if self.job_for(folder):
             messagebox.showerror("ClipFarm", "Tenhle stream se zrovna zpracovává, nejdřív ho ukonči.")
         elif messagebox.askyesno("ClipFarm", f"Smazat zdrojové video ({size(folder / 'stream.mp4')})?\n"
                                              "Klipy zůstanou, ale stream pak už nepůjde přestříhat."):
@@ -543,7 +620,9 @@ class App(tk.Tk):
         if path is None:
             return
         folder = path if kind == "stream" else path.parent
-        if self.in_use(folder):
+        if kind == "clip" and path.name == "stream.mp4":
+            self.delete_source()
+        elif self.job_for(folder):
             messagebox.showerror("ClipFarm", "Tenhle stream se zrovna zpracovává, nejdřív ho ukonči.")
         elif kind == "clip" and messagebox.askyesno("ClipFarm", f"Smazat klip {path.name}?"):
             delete_clip(folder, path.name)
@@ -567,11 +646,10 @@ def selftest():
     assert Klipy.stop_time(flag) == 0.0, "Ukončit = hned"
     set_stop(p.pid, 90)
     assert 89 * 60 < Klipy.stop_time(flag) - time.time() <= 90 * 60, "časovač"  # type: ignore[operator]
-    assert end_text(p.pid, "https://kick.com/x").startswith("za 1 h 29 min"), end_text(p.pid, "https://kick.com/x")
+    assert end_text(p.pid, "https://kick.com/x") in ("1:30:00", "1:29:59"), end_text(p.pid, "https://kick.com/x")
     set_stop(p.pid, 0)
     assert not flag.exists() and end_text(p.pid, "https://kick.com/x") == "dokud neskončí"
     assert end_text(p.pid, "https://youtu.be/x") == "–"
-    assert [duration(t) for t in (42, 125, 3725)] == ["42 s", "2 min", "1 h 02 min"]
     assert [minutes(t) for t in ("dokud neskončí", "", "45", "45 min", "2 h", "1 h 30 min", "1h30")] == \
         [0, 0, 45, 45, 120, 90, 90]
     for bad in ("abc", "h", "1 den"):
@@ -584,6 +662,11 @@ def selftest():
     p.kill()
     p.wait()
     assert not alive(p.pid) and p.pid not in jobs() and not job.exists() and not flag.exists(), "po skončeném jobu se uklidí"
+    # Zastavit: úloha i její yt-dlp (vlastní skupina procesů) musí skončit
+    sleeper = [sys.executable, "-c", "import time; time.sleep(30)"]
+    job_p, ytdlp_p = (subprocess.Popen(sleeper, start_new_session=True) for _ in range(2))
+    kill(job_p.pid, {"ytdlp": ytdlp_p.pid})
+    assert job_p.wait(timeout=5) != 0 and ytdlp_p.wait(timeout=5) != 0, "Zastavit"
     with tempfile.NamedTemporaryFile("w", delete=False) as f:
         f.write("a\n[download] 1%\r[download] 2%\r[download] 3%\n\n")
     assert tail(f.name, 2) == ["[download] 2%", "[download] 3%"], tail(f.name, 2)
@@ -605,6 +688,16 @@ def selftest():
         assert "02.mp4" in page and "01.mp4" not in page and not (folder / "01.mp4").exists()
         delete_stream(folder)
         assert not (Path(d) / "kanal").exists() and "kanal" not in (Path(d) / "index.html").read_text(encoding="utf-8")
+    with tempfile.TemporaryDirectory() as d:  # v seznamu je každá složka s videem, i bez klipů a stránky
+        root, Klipy.ROOT = Klipy.ROOT, Path(d)
+        try:
+            (Path(d) / "kanal" / "nedokonceny").mkdir(parents=True)
+            (Path(d) / "kanal" / "nedokonceny" / "stream.mp4").write_bytes(b"")
+            (Path(d) / "kanal" / "prazdny").mkdir()
+            assert [(f.name, clips, others) for _, f, _, clips, others, _ in streams()] == \
+                [("nedokonceny", [], ["stream.mp4"])], streams()
+        finally:
+            Klipy.ROOT = root
     assert [Klipy.clips_word(n) for n in (0, 1, 3, 5)] == ["0 klipů", "1 klip", "3 klipy", "5 klipů"]
     test_server()
     print("ok")

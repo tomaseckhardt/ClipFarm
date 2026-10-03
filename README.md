@@ -15,8 +15,9 @@ Windows i macOS, ovládá se z jednoho okna.
   nebo po nastavenou dobu (časovač), nebo dokud nezmáčkneš **Ukončit a nastříhat**.
 - **Výběr momentů** podle reakce chatu (spam jednoho člověka se nepočítá) a hlasitosti, viz níž.
 - **Klipy** začínají na střihu scény nebo v pauze mezi slovy a končí, až reakce opadne (typicky 20–60 s).
-- **Okno** na všechno: spuštění, přehled běžících nahrávání, časovač, přehrání klipu, přestříhání
-  s jiným limitem, mazání. Nahrávání běží dál i po zavření okna.
+  Na šířku 16:9, nebo **na výšku 9:16** (Shorts, TikTok, Reels) s rozmazaným pozadím.
+- **Okno** na všechno: spuštění, přehled běžících nahrávání s odpočtem, časovač, přehrání klipu nebo
+  zdrojového videa, přepočet skóre, přestříhání s jiným limitem, mazání. Nahrávání běží dál i po zavření okna.
 - **Neuspává počítač**, dokud něco běží (na Linuxu i po zaklapnutí víka).
 - **Prohlížení v prohlížeči** přes vestavěný server `http://127.0.0.1:8765/`, který funguje i s prohlížečem
   ve Flatpaku nebo po přesunutí složky.
@@ -39,22 +40,27 @@ Po přesunutí složky spusť `ClipFarm.py` jednou ručně, ať ikona ukazuje na
 
 ### Okno (`ClipFarm.py`)
 
-**Nahoře:** odkaz, **Limit skóre** (jak výrazný musí moment být, výchozí 2,5) a **Nahrávat živák**
-(„dokud neskončí“, 30 min, 2 h… nebo vlastní, třeba `1 h 30 min`). Pak **▶ Spustit**.
+**Nahoře:** odkaz a **▶ Spustit**. Pod tím nastavení pro spuštění i přestříhání: **Limit skóre** (jak výrazný
+musí moment být, výchozí 2,5), **Nahrávat živák** („dokud neskončí“, 30 min, 2 h… nebo vlastní, třeba
+`1 h 30 min`) a **Klipy na výšku 9:16**.
 
 **Karta Běží**
 
-- všechno, co běží (i spuštěné z terminálu): jak dlouho, kdy skončí, kolik je nahráno,
-- **⏹ Ukončit a nastříhat**: ukončí nahrávání a hned nastříhá, co je nahrané,
-- **Změnit konec**: časovač i u nahrávání, které už běží,
-- **Neuspávat počítač** a log vybraného nahrávání.
+- všechno, co běží (i spuštěné z terminálu): jak dlouho, **odpočet do konce** nahrávání, kolik je nahráno,
+- **⏹ Ukončit a nastříhat**: ukončí nahrávání živáku a hned nastříhá, co je nahrané,
+- **Změnit konec** + **⏱ Nastavit**: časovač i u nahrávání, které už běží,
+- **■ Stop**: objeví se jen u vybraného přestříhání nebo přepočtu skóre a zastaví ho (hotové klipy zůstanou),
+- **Neuspávat počítač** a log vybrané úlohy.
 
 **Karta Klipy**
 
-- streamer → stream → klipy (čas ve streamu, délka, skóre), dvojklik klip přehraje,
-- **✂ Přestříhat**: znovu nastříhá stream s aktuálním limitem bez stahování; staré klipy se nahradí,
-  až budou nové hotové,
-- **Otevřít složku**, **V prohlížeči**, **Smazat zdrojové video** (uvolní místo, klipy zůstanou), **Smazat**.
+- streamer → stream → zdrojové video (`stream.mp4`) a klipy (čas ve streamu, délka, skóre); vidět je každá
+  složka s videem, i nedokončená nebo bez klipů; dvojklik přehraje,
+- **✂ Přestříhat**: znovu nastříhá stream s aktuálním limitem a formátem bez stahování (použije i uložený
+  chat); staré klipy se nahradí, až budou nové hotové,
+- **Σ Přepočítat skóre**: nic nestříhá, jen ukáže, kolik klipů by dal který limit, a přepočítá skóre
+  současných klipů na aktuální stupnici,
+- **Složka**, **V prohlížeči**, **Smazat zdroj** (uvolní místo, klipy zůstanou), **Smazat**.
 
 ### Terminál (`Klipy.py`)
 
@@ -64,6 +70,8 @@ python3 Klipy.py <odkaz | složka streamu> [limit skóre] [minuty nahrávání �
 python3 Klipy.py "https://www.youtube.com/watch?v=..."              # stáhnout a nastříhat
 python3 Klipy.py https://kick.com/lukyonair1 2.5 90                # nahrávat 90 min, pak nastříhat
 python3 Klipy.py "klipy/lukyonair1/2026-10-02 16.50 – …" 1.5       # přestříhat s nižším limitem
+python3 Klipy.py --skore "klipy/lukyonair1/2026-10-02 16.50 – …"    # jen přepočítat skóre
+CLIPFARM_VERTICAL=1 python3 Klipy.py "https://…"                    # klipy na výšku 9:16
 ```
 
 Ctrl+C během nahrávání = ukončit a nastříhat, co je nahrané.
